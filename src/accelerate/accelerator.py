@@ -18,7 +18,7 @@ import math
 import os
 import sys
 import warnings
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import wraps
 from typing import List, Optional, Union
 
@@ -510,16 +510,17 @@ class Accelerator:
         yield from self._goes_first(self.is_local_main_process)
 
     @contextmanager
-    def no_sync(self, model):
+    def no_sync(self, *models):
         """
         A context manager to disable gradient synchronizations across DDP processes by calling
-        `torch.nn.parallel.DistributedDataParallel.no_sync`.
+        `torch.nn.parallel.DistributedDataParallel.no_sync` for an arbitrary amount of models.
 
-        If `model` is not in DDP, this context manager does nothing
+        If `models` is not in DDP, this context manager does nothing
 
         Args:
-            model (`torch.nn.Module`):
-                PyTorch Module that was prepared with `Accelerator.prepare`
+            models (list of `torch.nn.Module`):
+                PyTorch Module(s) that was prepared with `Accelerator.prepare` and contains gradients that will be used
+                during training
 
         Example:
 
@@ -544,11 +545,13 @@ class Accelerator:
         ```
         """
         context = contextlib.nullcontext
+        contexts = []
         if self.use_distributed:
-            context = getattr(model, "no_sync", context)
+            for model in models:
+                contexts.append(getattr(model, "no_sync", context))
 
-        with context():
-            yield
+        with ExitStack() as stack:
+            yield [stack.enter_context(model_ctx() for model_ctx in contexts)]
 
     def _do_sync(self):
         "Sets the right `sync_gradients` context and either resets or increases `self.step`"
@@ -564,13 +567,14 @@ class Accelerator:
         return self.gradient_state.sync_gradients
 
     @contextmanager
-    def accumulate(self, model):
+    def accumulate(self, *models):
         """
-        A context manager that will lightly wrap around and perform gradient accumulation automatically
+        A context manager that will lightly wrap and perform gradient accumulation automatically
 
         Args:
-            model (`torch.nn.Module`):
-                PyTorch Module that was prepared with `Accelerator.prepare`
+            models (list of `torch.nn.Module`):
+                PyTorch Module(s) that was prepared with `Accelerator.prepare` and contains gradients that will be used
+                during training
 
         Example:
 
@@ -596,7 +600,7 @@ class Accelerator:
         else:
             context = self.no_sync
 
-        with context(model):
+        with context(models):
             yield
 
     def print(self, *args, **kwargs):

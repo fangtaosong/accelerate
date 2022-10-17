@@ -186,6 +186,59 @@ def test_gradient_accumulation(split_batches=False, dispatch_batches=False):
         ddp_input = ddp_input[torch.randperm(len(ddp_input))]
 
 
+def test_gradient_accumulation_multiple_models(split_batches=False, dispatch_batches=False):
+    accelerator = Accelerator(
+        gradient_accumulation_steps=2, split_batches=split_batches, dispatch_batches=dispatch_batches
+    )
+    # Test that context manager behaves properly
+    model, ddp_model, dataloader = get_training_setup(accelerator)
+    model2, ddp_model2 = deepcopy(model), deepcopy(model)
+    ddp_model2 = accelerator.prepare(ddp_model2)
+
+    for iteration, batch in enumerate(dataloader):
+        ddp_input, ddp_target = batch.values()
+        # Gather the distributed inputs and targs for the base model
+        input, target = accelerator.gather((ddp_input, ddp_target))
+        input, target = input.to(accelerator.device), target.to(accelerator.device)
+        # Perform our initial ground truth step in non "DDP"
+        model.train()
+        model2.train()
+        output = model(input)
+        output2 = model2(input)
+        output = (output + output2) / 2
+        loss = F.mse_loss(output, target.to(output.device))
+        loss /= accelerator.gradient_accumulation_steps
+        loss.backward()
+        # Do "gradient accumulation" (noop)
+        with accelerator.accumulate(ddp_model, ddp_model2):
+            ddp_model.train()
+            ddp_model2.train()
+            output = model(input)
+            output2 = model2(input)
+            output = (output + output2) / 2
+            loss = F.mse_loss(output, target.to(output.device))
+            accelerator.backward(loss)
+
+        # DDP model and model should only be in sync when not (iteration % 2 == 0)
+        for param, ddp_param in zip(model.parameters(), ddp_model.parameters(), ddp_model2.parameters()):
+            if not param.requires_grad:
+                continue
+            if ((iteration + 1) % 2 == 0) or (iteration == len(dataloader) - 1):
+                # Grads should be in sync
+                assert (
+                    torch.allclose(param.grad, ddp_param.grad) is True
+                ), f"Gradients not in sync when they should be at iteration {iteration}:\nModel grad ({param.grad}) != DDP grad ({ddp_param.grad})"
+            else:
+                # Grads should not be in sync
+                assert (
+                    torch.allclose(param.grad, ddp_param.grad) is False
+                ), f"Gradients in sync when they should not be at iteration {iteration}:\nModel grad ({param.grad}) == DDP grad ({ddp_param.grad})"
+
+        # Shuffle ddp_input on each iteration
+        torch.manual_seed(1337 + iteration)
+        ddp_input = ddp_input[torch.randperm(len(ddp_input))]
+
+
 def test_gradient_accumulation_with_opt_and_scheduler(split_batches=False, dispatch_batches=False):
     accelerator = Accelerator(
         gradient_accumulation_steps=2, split_batches=split_batches, dispatch_batches=dispatch_batches
