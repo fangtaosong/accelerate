@@ -87,6 +87,8 @@ def save(obj, f):
         obj: The data to save
         f: The file (or file-like object) to use to save the data
     """
+    if isinstance(obj, torch.nn.Module):
+        obj = extract_model_from_parallel(obj)
     if AcceleratorState().distributed_type == DistributedType.TPU:
         xm.save(obj, f)
     elif AcceleratorState().local_process_index == 0:
